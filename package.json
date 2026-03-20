@@ -1,0 +1,28 @@
+{
+  "name": "kilimall-sniper",
+  "version": "1.0.0",
+  "description": "Kilimall flash sale sniper",
+  "main": "sniper.js",
+  "scripts": {
+    "start": "node sniper.js"
+  },
+  "dependencies": {
+    "node-fetch": "^2.6.9"
+  }
+}
+```
+
+---
+
+**File 2: `.env`**
+```
+SALE_HOUR=10
+SALE_MINUTE=0
+SALE_SECOND=0
+FLASH_SESSION_ID=PASTE_FRESH_ID_HERE
+ADDRESS_ID=101958803
+MPESA_PHONE=254721858157
+COOKIES=PASTE_YOUR_COOKIES_HERE
+TARGETS=IPCONE:200,Samsung:13000,Realme:13000
+BUY_ALL=false
+POLL_INTERVAL=200
