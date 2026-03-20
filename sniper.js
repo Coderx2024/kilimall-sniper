@@ -1,23 +1,24 @@
 // ============================================
-// KILIMALL SNIPER — RAILWAY EDITION
+// KILIMALL SNIPER — RAILWAY EDITION v2.0
+// No external dependencies — Node 18 native
 // ============================================
 
-const fetch = require('node-fetch');
+const https = require('https');
 const querystring = require('querystring');
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // CONFIG FROM ENVIRONMENT VARIABLES
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const CONFIG = {
-  addressId:       process.env.ADDRESS_ID,
-  mpesaPhone:      process.env.MPESA_PHONE,
-  flashSessionId:  process.env.FLASH_SESSION_ID,
-  cookies:         process.env.COOKIES,
-  buyAll:          process.env.BUY_ALL === 'true',
-  pollInterval:    parseInt(process.env.POLL_INTERVAL) || 200,
-  saleHour:        parseInt(process.env.SALE_HOUR),
-  saleMinute:      parseInt(process.env.SALE_MINUTE),
-  saleSecond:      parseInt(process.env.SALE_SECOND) || 0,
+  addressId:      process.env.ADDRESS_ID,
+  mpesaPhone:     process.env.MPESA_PHONE,
+  flashSessionId: process.env.FLASH_SESSION_ID,
+  cookies:        process.env.COOKIES,
+  buyAll:         process.env.BUY_ALL === 'true',
+  pollInterval:   parseInt(process.env.POLL_INTERVAL) || 200,
+  saleHour:       parseInt(process.env.SALE_HOUR),
+  saleMinute:     parseInt(process.env.SALE_MINUTE),
+  saleSecond:     parseInt(process.env.SALE_SECOND) || 0,
   targets: (process.env.TARGETS || '').split(',').map(t => {
     const [keyword, maxPrice] = t.split(':');
     return { keyword, maxPrice: parseInt(maxPrice), label: keyword };
@@ -79,35 +80,77 @@ function alreadyBought(skuId) {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// HTTP REQUEST WRAPPER
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function httpRequest(hostname, path, method, headers, postData = null) {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname,
+      path,
+      method,
+      headers,
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          resolve({ status: res.statusCode, body: JSON.parse(data) });
+        } catch {
+          resolve({ status: res.statusCode, body: data });
+        }
+      });
+    });
+
+    req.on('error', reject);
+
+    req.setTimeout(8000, () => {
+      req.destroy();
+      reject(new Error('Request timeout'));
+    });
+
+    if (postData) req.write(postData);
+    req.end();
+  });
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // STEP 1: POLL FLASH SALE
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async function pollFlashSale() {
-  const url = `https://mall-api.kilimall.com/fs-session/${CONFIG.flashSessionId}/skus?lastId=-1&limit=18&categoryId=0&skip=0`;
+  const path = `/fs-session/${CONFIG.flashSessionId}/skus?lastId=-1&limit=18&categoryId=0&skip=0`;
 
   async function doFetch() {
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: getHeaders(),
-    });
+    const result = await httpRequest(
+      'mall-api.kilimall.com',
+      path,
+      'GET',
+      getHeaders()
+    );
 
-    console.log(`📡 Poll status: ${res.status}`);
+    console.log(`📡 Poll status: ${result.status}`);
 
-    if (!res.ok) {
-      const txt = await res.text();
-      console.warn(`⚠️ Bad response: ${res.status} → ${txt}`);
+    if (result.status === 429) {
+      console.warn(`⚠️ Rate limited — backing off...`);
+      await new Promise(r => setTimeout(r, 1000));
       return [];
     }
 
-    const json = await res.json();
-
-    if (json.code !== 0) {
-      console.warn(`⚠️ API code: ${json.code} | ${json.msg}`);
+    if (result.status !== 200) {
+      console.warn(`⚠️ Bad response: ${result.status} →`, result.body);
       return [];
     }
 
-    const skus = json.data?.skus || [];
+    if (result.body.code !== 0) {
+      console.warn(`⚠️ API code: ${result.body.code} | ${result.body.msg}`);
+      return [];
+    }
+
+    const skus = result.body.data?.skus || [];
+
     skus.forEach(sku => {
-      console.log(`   → [${sku.inventoryStatus}] ${sku.title?.substring(0,40)} | KSh ${sku.salePrice} | stock: ${sku.inventory} | promised: ${sku.promiseStock}`);
+      console.log(`   → [${sku.inventoryStatus}] ${String(sku.title).substring(0, 40)} | KSh ${sku.salePrice} | stock: ${sku.inventory} | promised: ${sku.promiseStock}`);
     });
 
     return skus;
@@ -131,22 +174,27 @@ async function pollFlashSale() {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function matchTargets(skus) {
   const matches = [];
+
   for (let target of CONFIG.targets) {
     for (let sku of skus) {
       if (!sku.title) continue;
+
       const titleMatch = sku.title.toUpperCase().includes(target.keyword.toUpperCase());
       const isLive = sku.inventoryStatus === 1 && sku.inventory > 0;
       const priceOk = sku.salePrice <= target.maxPrice;
       const notBought = !alreadyBought(sku.skuId);
+
       if (titleMatch) {
         console.log(`🔍 ${target.keyword}: live=${isLive} | priceOk=${priceOk} | status=${sku.inventoryStatus} | stock=${sku.inventory}`);
       }
+
       if (titleMatch && isLive && priceOk && notBought) {
         matches.push({ sku, target });
         break;
       }
     }
   }
+
   return matches;
 }
 
@@ -170,7 +218,7 @@ async function placeOrder(sku) {
     activityType: 1
   }]);
 
-  const body = querystring.stringify({
+  const postData = querystring.stringify({
     addressId: CONFIG.addressId,
     preOrderId: "1",
     skuItems,
@@ -183,16 +231,25 @@ async function placeOrder(sku) {
   });
 
   try {
-    const res = await fetch("https://mall-api.kilimall.com/v2/place-order", {
-      method: 'POST',
-      headers: getHeaders({ "Content-Type": "application/x-www-form-urlencoded" }),
-      body,
-    });
-    const json = await res.json();
-    console.log(`📦 Order response:`, json);
-    if (json.code === 0 || res.status === 201) return json.data;
-    console.error(`❌ Order failed: ${json.msg}`);
-    return null;
+    const result = await httpRequest(
+      'mall-api.kilimall.com',
+      '/v2/place-order',
+      'POST',
+      getHeaders({
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(postData),
+      }),
+      postData
+    );
+
+    console.log(`📦 Order response:`, result.body);
+
+    if (result.body.code === 0 || result.status === 201) {
+      return result.body.data;
+    } else {
+      console.error(`❌ Order failed: ${result.body.msg}`);
+      return null;
+    }
   } catch (err) {
     console.error(`❌ Order error: ${err.message}`);
     return null;
@@ -204,21 +261,29 @@ async function placeOrder(sku) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async function triggerMpesa(billId, label) {
   console.log(`📱 Triggering M-Pesa | Bill: ${billId}`);
-  const body = querystring.stringify({
+
+  const postData = querystring.stringify({
     billId: String(billId),
     payChannel: "5",
     phone: CONFIG.mpesaPhone,
     payType: "1"
   });
+
   try {
-    const res = await fetch("https://mall-api.kilimall.com/v2/pay", {
-      method: 'POST',
-      headers: getHeaders({ "Content-Type": "application/x-www-form-urlencoded" }),
-      body,
-    });
-    const json = await res.json();
-    console.log(`💳 Payment response:`, json);
-    if (json.code === 0) {
+    const result = await httpRequest(
+      'mall-api.kilimall.com',
+      '/v2/pay',
+      'POST',
+      getHeaders({
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(postData),
+      }),
+      postData
+    );
+
+    console.log(`💳 Payment response:`, result.body);
+
+    if (result.body.code === 0) {
       console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
       console.log(`🎉 M-PESA STK PUSH SENT!`);
       console.log(`🛍️  Item: ${label}`);
@@ -226,7 +291,7 @@ async function triggerMpesa(billId, label) {
       console.log(`⏰ ENTER PIN — 60 SECONDS!`);
       console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     } else {
-      console.warn(`⚠️ STK issue: ${json.msg}`);
+      console.warn(`⚠️ STK issue: ${result.body.msg}`);
       console.log(`👉 Pay manually at kilimall.co.ke/orders`);
     }
   } catch (err) {
@@ -243,7 +308,7 @@ async function mainLoop() {
   tick++;
 
   if (tick % 5 === 0) {
-    process.stdout.write(`\r⏳ ${getCountdown()} | Watching ${CONFIG.targets.length} target(s)...`);
+    process.stdout.write(`\r⏳ ${getCountdown()} | Watching ${CONFIG.targets.length} target(s)...   `);
   }
 
   if (!isAtSaleTime()) return;
@@ -261,16 +326,21 @@ async function mainLoop() {
 
   for (let { sku, target } of toBuy) {
     if (alreadyBought(sku.skuId)) continue;
+
     console.log(`\n🎯 TARGET ACQUIRED: ${target.label}`);
     console.log(`💰 Price: KSh ${sku.salePrice}`);
     console.log(`📦 Stock: ${sku.inventory}`);
+
     const orderData = await placeOrder(sku);
+
     if (orderData?.billId) {
       purchased.push(String(sku.skuId));
       console.log(`✅ ORDER CONFIRMED: ${target.label}`);
       console.log(`📋 Bill ID: ${orderData.billId}`);
+      console.log(`📋 Order Code: ${orderData.code}`);
       await triggerMpesa(orderData.billId, target.label);
     }
+
     if (CONFIG.buyAll) await new Promise(r => setTimeout(r, 300));
   }
 
@@ -291,7 +361,7 @@ async function mainLoop() {
 // ARM
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-console.log("💀 KILIMALL SNIPER — RAILWAY EDITION");
+console.log("💀 KILIMALL SNIPER — RAILWAY EDITION v2.0");
 console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 CONFIG.targets.forEach((t, i) => {
   console.log(`   ${i + 1}. ${t.label} (max KSh ${t.maxPrice})`);
@@ -300,49 +370,9 @@ console.log(`⏰ Sale: ${CONFIG.saleHour}:${String(CONFIG.saleMinute).padStart(2
 console.log(`📡 Session: ${CONFIG.flashSessionId}`);
 console.log(`🏠 Address: ${CONFIG.addressId}`);
 console.log(`📱 M-Pesa: ${CONFIG.mpesaPhone}`);
+console.log(`⚡ Poll: every ${CONFIG.pollInterval}ms`);
+console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+console.log("🔕 Watching... Phone unlocked. Wait for PIN.");
 console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
 setInterval(mainLoop, CONFIG.pollInterval);
-```
-
----
-
-**Step 3 — Push to GitHub**
-
-1. Go to `github.com` → New repository → name it `kilimall-sniper` → Public → Create
-2. Upload your 3 files by dragging them into the repo page
-3. Click "Commit changes"
-
----
-
-**Step 4 — Deploy on Railway**
-
-1. Go to `railway.app` → New Project
-2. Click **"Deploy from GitHub repo"**
-3. Select `kilimall-sniper`
-4. Railway auto-detects Node.js and deploys
-
----
-
-**Step 5 — Set environment variables on Railway**
-
-1. Click your project → **Variables** tab
-2. Add each variable from your `.env` file one by one
-3. Most important ones to set before each sale:
-```
-FLASH_SESSION_ID = fresh ID from Network tab
-SALE_HOUR = 10
-SALE_MINUTE = 0
-COOKIES = your fresh cookies
-```
-
----
-
-**Step 6 — Get your cookies**
-
-1. Go to kilimall.co.ke — make sure you're logged in
-2. F12 → Application → Cookies → `https://www.kilimall.co.ke`
-3. Copy `HWWAFSESID` and `HWWAFSESTIME` values
-4. Paste into Railway Variables as:
-```
-COOKIES = HWWAFSESID=abc123; HWWAFSESTIME=xyz456
