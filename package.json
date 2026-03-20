@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node sniper.js"
   },
-  "dependencies": {
-    "node-fetch": "^2.6.9"
+  "engines": {
+    "node": "18.x"
   }
 }
